@@ -1,0 +1,13 @@
+Video.js P16 Player — community build 1.0.0
+
+Based on Video.js 8.24.0.
+Copyright 2010-present Video.js contributors.
+Includes vtt.js, VHS/http-streaming and mux.js components distributed by Video.js.
+Original source notices are retained in dist/video.js and UPSTREAM_LICENSE.
+
+Modifications: P16 parameter parsing, CEA-708 window presentation metadata,
+relative-window cursor handling, standalone demo and regression tests.
+These additions are distributed under Apache License 2.0.
+
+Video.js is a registered trademark of Brightcove Inc. This is an independent
+community distribution, not an official or endorsed Video.js release.

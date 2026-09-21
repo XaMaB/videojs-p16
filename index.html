@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video.js P16 Player</title>
+<link rel="stylesheet" href="dist/video-js.min.css">
+<style>
+:root{color-scheme:dark}body{margin:0;background:#101623;color:#e5edf8;font:16px system-ui}main{max-width:1100px;margin:40px auto;padding:0 24px}h1{font-size:28px}small,p{color:#a5b6ce}form,.toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:18px 0}input[type=url]{flex:1;min-width:240px}input,button,select{font:inherit;padding:11px;border:1px solid #3c4f68;border-radius:8px;background:#1b293c;color:inherit}button{cursor:pointer;background:#245ea6}.video-js{width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#182233;padding:16px;border-radius:10px}#status{min-height:24px}summary{cursor:pointer}
+</style>
+</head><body><main>
+<small>Community build 1.0.0 · based on Video.js 8.24.0</small>
+<h1>Video.js P16 Player</h1>
+<p>HLS playback with CEA-708 P16, Cyrillic captions and incremental two-line updates.</p>
+<form id="load"><input id="url" aria-label="HLS URL" type="url" required placeholder="Enter an HLS playlist URL"><button>Load stream</button></form>
+<div id="host"></div>
+<div class="toolbar"><label>Captions <select id="tracks"><option value="-1">Off</option></select></label><label><input id="stream-style" type="checkbox" checked> Use transmitted CC colors / opacity</label><button id="stop" type="button">Stop</button></div>
+<p id="status" role="status">Ready — enter your HLS URL.</p>
+<details><summary>Player diagnostics</summary><pre id="diagnostics"></pre></details>
+<p>No bundled streams or server-side dependencies. Your stream must allow browser access (CORS). This is an independent community build, not an official Video.js release.</p>
+<script src="dist/video.js?v=1.0.0"></script><script src="app.js?v=1.0.0"></script>
+</main></body></html>

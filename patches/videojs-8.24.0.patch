@@ -1,0 +1,280 @@
+--- a/dist/video.js
++++ b/dist/video.js
+@@ -8,6 +8,10 @@
+  * Includes vtt.js <https://github.com/mozilla/vtt.js>
+  * Available under Apache License Version 2.0
+  * <https://github.com/mozilla/vtt.js/blob/main/LICENSE>
++ *
++ * Modified community distribution: videojs-p16 1.0.0.
++ * Adds P16 parameter handling, CEA-708 presentation metadata and bounded
++ * relative-window cursor handling. See PATCHES.md for scope and provenance.
+  */
+ 
+ (function (global, factory) {
+@@ -13832,7 +13836,7 @@
+      *        Text track object containing active cues to style.
+      */
+     updateDisplayState(track) {
+-      const overrides = this.player_.textTrackSettings.getValues();
++      const preferences = this.player_.textTrackSettings.getValues();
+       const cues = track.activeCues;
+       let i = cues.length;
+       while (i--) {
+@@ -13840,7 +13844,37 @@
+         if (!cue) {
+           continue;
+         }
++        const overrides = Object.assign({}, preferences);
++        // Video.js settings include opaque-black defaults even without user
++        // interaction. Explicit stream-appearance mode must not treat those
++        // defaults as viewer overrides. Other accessibility settings remain.
++        if (cue.cea708Style && this.player_.options_.cea708UseStreamStyles) {
++          ['color', 'textOpacity', 'backgroundColor', 'backgroundOpacity',
++            'windowColor', 'windowOpacity'].forEach(key => delete overrides[key]);
++        }
+         const cueDiv = cue.displayState;
++        // Apply transmitted 708 colors/opacity before viewer accessibility
++        // overrides. No page-wide CSS override or hard-coded stream position.
++        if (cue.cea708Style && cueDiv && cueDiv.firstChild) {
++          const color = (attributes, prefix, opacityKey) => {
++            const r = attributes[prefix + 'Red'];
++            const g = attributes[prefix + 'Green'];
++            const b = attributes[prefix + 'Blue'];
++            const opacity = attributes[opacityKey];
++            if (![r, g, b, opacity].every(Number.isInteger)) return null;
++            if ([r, g, b, opacity].some(v => v < 0 || v > 3)) return null;
++            // Flash falls back to solid; animation is not implemented.
++            return `rgba(${r * 85}, ${g * 85}, ${b * 85}, ${[1, 1, 0.5, 0][opacity]})`;
++          };
++          const pen = cue.cea708Style.penColor;
++          const windowAttributes = cue.cea708Style.winAttr;
++          const foreground = color(pen, 'fg', 'fgOpacity');
++          const background = color(pen, 'bg', 'bgOpacity');
++          const fill = color(windowAttributes, 'fill', 'fillOpacity');
++          if (foreground) cueDiv.firstChild.style.color = foreground;
++          if (background) cueDiv.firstChild.style.backgroundColor = background;
++          if (fill) cueDiv.style.backgroundColor = fill;
++        }
+         if (overrides.color) {
+           cueDiv.firstChild.style.color = overrides.color;
+         }
+@@ -47789,8 +47823,23 @@
+     Cea708Window.prototype.clearText = function () {
+       this.rows = [''];
+       this.rowIdx = 0;
++      this.columnIdx = null;
++      this.pendingNewLine = false;
+     };
+     Cea708Window.prototype.newLine = function (pts) {
++      if (this.columnIdx !== null) {
++        if (this.rowIdx + 1 < this.virtualRowCount) {
++          this.rowIdx++;
++          while (this.rows.length <= this.rowIdx) this.rows.push('');
++        } else {
++          if (typeof this.beforeRowOverflow === 'function') this.beforeRowOverflow(pts);
++          this.rows.shift();
++          this.rows.push('');
++          this.rowIdx = this.rows.length - 1;
++        }
++        this.columnIdx = 0;
++        return;
++      }
+       if (this.rows.length >= this.virtualRowCount && typeof this.beforeRowOverflow === 'function') {
+         this.beforeRowOverflow(pts);
+       }
+@@ -47813,9 +47862,30 @@
+       return false;
+     };
+     Cea708Window.prototype.addText = function (text) {
++      if (this.columnIdx !== null) {
++        // Explicit SPL is a cell cursor, not a request to roll the window.
++        // Replace addressed cells; preserve text before and after them.
++        const row = Array.from(this.rows[this.rowIdx] || '');
++        for (const character of Array.from(text)) {
++          if (this.columnIdx > this.columnCount) break;
++          while (row.length < this.columnIdx) row.push(' ');
++          row[this.columnIdx++] = character;
++        }
++        this.rows[this.rowIdx] = row.join('');
++        return;
++      }
+       this.rows[this.rowIdx] += text;
+     };
+     Cea708Window.prototype.backspace = function () {
++      if (this.columnIdx !== null) {
++        if (this.columnIdx > 0) {
++          const row = Array.from(this.rows[this.rowIdx] || '');
++          this.columnIdx--;
++          if (this.columnIdx < row.length) row[this.columnIdx] = ' ';
++          this.rows[this.rowIdx] = row.join('').replace(/ +$/, '');
++        }
++        return;
++      }
+       if (!this.isEmpty()) {
+         var row = this.rows[this.rowIdx];
+         this.rows[this.rowIdx] = row.substr(0, row.length - 1);
+@@ -47994,7 +48064,7 @@
+         if (within708TextBlock(b)) {
+           i = this.handleText(i, service);
+         } else if (b === 0x18) {
+-          i = this.multiByteCharacter(i, service);
++          i = this.multiByteCharacter(i, service, start + size);
+         } else if (b === 0x10) {
+           i = this.extendedCommands(i, service);
+         } else if (0x80 <= b && b <= 0x87) {
+@@ -48018,7 +48088,7 @@
+         } else if (b === 0x91) {
+           i = this.setPenColor(i, service);
+         } else if (b === 0x92) {
+-          i = this.setPenLocation(i, service);
++          i = this.setPenLocation(i, service, start + size);
+         } else if (b === 0x8f) {
+           service = this.reset(i, service);
+         } else if (b === 0x08) {
+@@ -48147,16 +48217,22 @@
+      * @return {Integer}          New index after parsing
+      */
+ 
+-    Cea708Stream.prototype.multiByteCharacter = function (i, service) {
++    // P16 compatibility patch: parameter bytes are not G0/G1 text.
++    // Retain upstream Unicode fallback and explicit TextDecoder behavior.
++    Cea708Stream.prototype.multiByteCharacter = function (i, service, blockEnd) {
+       var packetData = this.current708Packet.data;
+-      var firstByte = packetData[i + 1];
+-      var secondByte = packetData[i + 2];
+-      if (within708TextBlock(firstByte) && within708TextBlock(secondByte)) {
+-        i = this.handleText(++i, service, {
+-          isMultiByte: true
+-        });
++      var end = Math.min(blockEnd === undefined ? packetData.length : blockEnd, packetData.length);
++      if (i + 2 >= end) {
++        // An incomplete P16 must not consume the next service's header or
++        // reinterpret its remaining parameter as a printable character.
++        return end - 1;
+       }
+-      return i;
++      if (packetData[i + 1] === 0) {
++        return this.handleText(i + 2, service);
++      }
++      return this.handleText(i + 1, service, {
++        isMultiByte: true
++      });
+     };
+     /**
+      * Parse and execute the CW# command.
+@@ -48285,16 +48361,30 @@
+      */
+ 
+     Cea708Stream.prototype.flushDisplayed = function (pts, service) {
+-      var displayedText = []; // TODO: Positioning not supported, displaying multiple windows will not necessarily
+-      // display text in the correct order, but sample files so far have not shown any issue.
++      var displayedText = [];
++      var windows = [];
+ 
+       for (var winId = 0; winId < 8; winId++) {
+         if (service.windows[winId].visible && !service.windows[winId].isEmpty()) {
+-          displayedText.push(service.windows[winId].getText());
++          // Keep the legacy plain-text payload free of coordinate padding;
++          // presentation snapshots retain the full positioned cell rows.
++          var captionWindow = service.windows[winId];
++          displayedText.push(captionWindow.columnIdx !== null ?
++            captionWindow.rows.map(row => row.replace(/^ +/, '')).join('\n').replace(/^\n+|\n+$/g, '') :
++            captionWindow.getText());
++          var win = service.windows[winId];
++          // Snapshot before a later command clears/mutates this window. Plain
++          // data survives the VHS worker boundary; keep legacy text as well.
++          windows.push({text: win.getText(), relativePositioning: win.relativePositioning,
++            anchorVertical: win.anchorVertical, anchorHorizontal: win.anchorHorizontal,
++            anchorPoint: win.anchorPoint, rowCount: win.rowCount,
++            columnCount: win.columnCount, winAttr: Object.assign({}, win.winAttr),
++            penColor: Object.assign({}, win.penColor)});
+         }
+       }
+       service.endPts = pts;
+       service.text = displayedText.join('\n\n');
++      service.cea708Windows = windows;
+       this.pushCaption(service);
+       service.startPts = pts;
+     };
+@@ -48310,6 +48400,7 @@
+           startPts: service.startPts,
+           endPts: service.endPts,
+           text: service.text,
++          cea708Windows: service.cea708Windows,
+           stream: 'cc708_' + service.serviceNum
+         });
+         service.text = '';
+@@ -48509,19 +48600,32 @@
+      * @return {Integer}          New index after parsing
+      */
+ 
+-    Cea708Stream.prototype.setPenLocation = function (i, service) {
++    Cea708Stream.prototype.setPenLocation = function (i, service, blockEnd) {
+       var packetData = this.current708Packet.data;
+-      var b = packetData[i];
+-      var penLoc = service.currentWindow.penLoc; // Positioning isn't really supported at the moment, so this essentially just inserts a linebreak
+-
+-      service.currentWindow.pendingNewLine = true;
+-      b = packetData[++i];
+-      penLoc.row = b & 0x0f; // r
+-
+-      b = packetData[++i];
+-      penLoc.column = b & 0x3f; // c
+-
+-      return i;
++      var end = Math.min(blockEnd === undefined ? packetData.length : blockEnd, packetData.length);
++      if (i + 2 >= end) return end - 1;
++      var win = service.currentWindow;
++      var row = packetData[i + 1] & 0x0f;
++     var column = packetData[i + 2] & 0x3f;
++      // Preview scope: relative, horizontal left-to-right windows only.
++      // Keep the legacy decoder path for other window geometries.
++      if (!win.relativePositioning || win.winAttr.printDirection !== 0) {
++        win.pendingNewLine = true;
++        win.penLoc.row = row;
++        win.penLoc.column = column;
++        return i + 2;
++      }
++     if (row >= win.virtualRowCount || column > win.columnCount) return i + 2;
++      // Close the previous visible state before incremental text mutates it.
++      // Hidden-bank preparation must not flush or alter the visible bank.
++      if (win.visible) this.flushDisplayed(this.getPts(i), service);
++      win.pendingNewLine = false;
++      win.penLoc.row = row;
++      win.penLoc.column = column;
++      win.rowIdx = row;
++      win.columnIdx = column;
++      while (win.rows.length <= row) win.rows.push('');
++      return i + 2;
+     };
+     /**
+      * Execute the RST command.
+@@ -57382,7 +57486,27 @@
+       const track = caption.stream; // in CEA 608 captions, video.js/mux.js sends a content array
+       // with positioning data
+ 
+-      if (caption.content) {
++      if (caption.cea708Windows && caption.cea708Windows.length) {
++        caption.cea708Windows.forEach(value => {
++          // Relative anchors are independent of aspect ratio. Absolute 708
++          // geometry requires an aspect-ratio contract not present here yet.
++          const cue = new Cue(caption.startTime + timestampOffset, caption.endTime + timestampOffset, value.text);
++          if (value.relativePositioning && value.anchorPoint <= 8) {
++            const x = Math.max(0, Math.min(100, value.anchorHorizontal * 100 / 99));
++            const y = Math.max(0, Math.min(100, value.anchorVertical * 100 / 99));
++            const horizontal = value.anchorPoint % 3;
++            cue.snapToLines = false;
++            cue.position = x;
++            cue.positionAlign = ['line-left', 'center', 'line-right'][horizontal];
++            cue.line = y;
++            cue.lineAlign = ['start', 'center', 'end'][Math.floor(value.anchorPoint / 3)];
++            cue.size = horizontal === 0 ? 100 - x : horizontal === 2 ? x : 2 * Math.min(x, 100 - x);
++          }
++          cue.align = ['left', 'right', 'center', 'left'][value.winAttr.justify || 0];
++          cue.cea708Style = {penColor: value.penColor, winAttr: value.winAttr};
++          inbandTextTracks[track].addCue(cue);
++        });
++      } else if (caption.content) {
+         caption.content.forEach(value => {
+           const cue = new Cue(caption.startTime + timestampOffset, caption.endTime + timestampOffset, value.text);
+           cue.line = value.line;

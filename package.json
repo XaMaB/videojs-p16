@@ -1,0 +1,11 @@
+{
+  "name": "videojs-p16",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Working Video.js community build with CEA-708 P16 Cyrillic support",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node --check app.js && node --check dist/video.js && node tests/p16.js && node tests/presentation.js && node tests/cursor.js"
+  },
+  "engines": {"node": ">=18"}
+}
